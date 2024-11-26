@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "T⁹",
+  "version": "1.0",
+  "description": "Система предиктивного ввода для VK с использованием AI",
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "*://*.vk.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.vk.com/*"],
+      "js": ["wordFrequency.js", "mistral.js", "content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "web_accessible_resources": [{
+    "resources": ["mistral.js"],
+    "matches": ["*://*.vk.com/*"]
+  }]
+}
