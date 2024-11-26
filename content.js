@@ -11,6 +11,11 @@ let wordCache = new Set(); // Кэш для сохранения выбранн�
 let wordFrequencyCache = null;
 let retryTimer = null;  // Добавляем переменную для хранения таймера
 let isEnabled = true; // Глобальная переменная для включения/выключения функционала
+let lastRequestedWord = '';
+let lastRequestedContext = '';
+let lastCursorPosition = 0;
+let pendingPredictions = new Map();
+let lastAttemptedWord = '';
 
 // Загружаем состояние при старте
 chrome.storage.sync.get(['isEnabled'], function(result) {
@@ -344,9 +349,17 @@ async function handleInput(event) {
 
     console.log('SYNTX DEBUG: Начало handleInput');
     
-    if (retryTimer) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
+    const element = event.target;
+    const { word: currentWord, contextBefore } = getWordAtCursor(element);
+
+    // Если слово изменилось во время ожидания ответа
+    if (retryTimer && lastAttemptedWord !== currentWord) {
+        console.log('SYNTX DEBUG: Слово изменилось с', lastAttemptedWord, 'на', currentWord);
+        // Сохраняем информацию о пропущенном слове
+        pendingPredictions.set(lastAttemptedWord, {
+            contextBefore,
+            timestamp: Date.now()
+        });
     }
 
     if (ignoreNextInput) {
@@ -355,60 +368,88 @@ async function handleInput(event) {
         return;
     }
 
-    const element = event.target;
-    const { word: currentWord, contextBefore } = getWordAtCursor(element);
-
     // Показываем подсказки после первой буквы
     if (!currentWord || currentWord.length < 1) {
         hideSuggestions();
         return;
     }
 
+    lastAttemptedWord = currentWord;
+    
     // Получаем предсказания из кэша
     const cachedSuggestions = wordFrequencyCache.getPredictions(currentWord, 3);
     console.log('SYNTX DEBUG: Предсказания из кэша:', cachedSuggestions);
 
     let aiSuggestions = [];
-    // Получаем предсказания от нейросети с учетом контекста
     try {
         aiSuggestions = await mistralPredictor.getPrediction(contextBefore + ' ' + currentWord);
         console.log('SYNTX DEBUG: Предсказания от ИИ:', aiSuggestions);
+        pendingPredictions.delete(currentWord);
     } catch (error) {
         if (error.message.includes('status: 429')) {
-            console.log('SYNTX DEBUG: Слишком много запросов, повторная попытка через 500мс');
+            console.log('SYNTX DEBUG: Слишком много запросов, начинаем цикл повторных попыток');
             
-            retryTimer = setTimeout(async () => {
-                if (!retryTimer) {
-                    console.log('SYNTX DEBUG: Повторный запрос был отменен');
-                    return;
-                }
-                
+            const retryPrediction = async () => {
+                if (!retryTimer) return;
+
                 try {
+                    // Сначала пытаемся получить предсказания для пропущенных слов
+                    for (const [word, data] of pendingPredictions.entries()) {
+                        if (Date.now() - data.timestamp > 5000) {
+                            pendingPredictions.delete(word);
+                            continue;
+                        }
+                        
+                        try {
+                            console.log('SYNTX DEBUG: Пытаемся получить предсказания для пропущенного слова:', word);
+                            const predictions = await mistralPredictor.getPrediction(data.contextBefore + ' ' + word);
+                            if (predictions && predictions.length > 0) {
+                                wordFrequencyCache.addPredictions(word, predictions);
+                            }
+                            pendingPredictions.delete(word);
+                        } catch (e) {
+                            if (!e.message.includes('status: 429')) {
+                                pendingPredictions.delete(word);
+                            }
+                        }
+                    }
+
+                    // Получаем актуальное состояние текста
                     const { word: retryWord, contextBefore: retryContext } = getWordAtCursor(element);
-                    const currentCachedSuggestions = wordFrequencyCache.getPredictions(retryWord, 3);
-                    console.log('SYNTX DEBUG: Текущее слово для повторной попытки:', retryWord);
-                    
+                    if (!retryWord || retryWord.length < 1) {
+                        clearTimeout(retryTimer);
+                        retryTimer = null;
+                        return;
+                    }
+
                     aiSuggestions = await mistralPredictor.getPrediction(retryContext + ' ' + retryWord);
                     console.log('SYNTX DEBUG: Предсказания от ИИ (повторная попытка):', aiSuggestions);
                     
-                    const combinedSuggestions = combinePredictions(currentCachedSuggestions, aiSuggestions, retryWord);
-                    
-                    if (combinedSuggestions.length > 0) {
+                    if (aiSuggestions && aiSuggestions.length > 0) {
+                        const combinedSuggestions = combinePredictions(
+                            wordFrequencyCache.getPredictions(retryWord, 3),
+                            aiSuggestions,
+                            retryWord
+                        );
                         showSuggestions(element, combinedSuggestions);
                     }
-                } catch (retryError) {
-                    console.error('SYNTX DEBUG: Ошибка при повторной попытке:', retryError);
-                } finally {
+                    
+                    clearTimeout(retryTimer);
                     retryTimer = null;
+                } catch (retryError) {
+                    if (retryError.message.includes('status: 429')) {
+                        const retryAfter = retryError.retryAfter || 1;
+                        console.log(`SYNTX DEBUG: Повторная попытка через ${retryAfter}с`);
+                        retryTimer = setTimeout(retryPrediction, retryAfter * 1000);
+                    }
                 }
-            }, 500);
-        } else {
-            console.error('SYNTX DEBUG: Ошибка получения предсказаний:', error);
+            };
+
+            retryTimer = setTimeout(retryPrediction, error.retryAfter ? error.retryAfter * 1000 : 500);
         }
     }
 
     const combinedSuggestions = combinePredictions(cachedSuggestions, aiSuggestions, currentWord);
-
     if (combinedSuggestions.length > 0) {
         showSuggestions(element, combinedSuggestions);
     } else {

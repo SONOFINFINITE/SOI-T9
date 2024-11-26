@@ -321,8 +321,8 @@ class MistralPredictor {
                     messages: [
                         { role: 'system', content: prompt }
                     ],
-                    max_tokens: 150,
-                    temperature: 0.7,  // Увеличиваем разнообразие
+                    max_tokens: 50,
+                    temperature: 0.4,  // Увеличиваем разнообразие
                     top_p: 0.9,        // Добавляем параметр для большего разнообразия
                     presence_penalty: 0.3  // Штраф за повторение токенов
                 })
@@ -330,11 +330,11 @@ class MistralPredictor {
 
             if (!response.ok) {
                 if (response.status === 429) {
-                    // Пробрасываем ошибку 429 наверх, чтобы content.js мог её обработать
-                    // и получить актуальный текст перед повторной попыткой
+                    // Создаем расширенный объект ошибки с информацией для повторных попыток
                     const error = new Error(`HTTP error! status: ${response.status}`);
                     error.status = response.status;
                     error.retryAfter = parseInt(response.headers.get('Retry-After')) || 1;
+                    error.isRetryable = true;
                     throw error;
                 }
                 throw new Error(`HTTP error! status: ${response.status}`);
